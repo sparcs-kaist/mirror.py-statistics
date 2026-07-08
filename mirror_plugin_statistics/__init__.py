@@ -8,10 +8,14 @@ Wiring only — the heavy lifting lives in the submodules:
   - config:       config.py
 
 The plug-in:
-  * setup() registers a MASTER.PACKAGE_STATUS_UPDATE.POST listener (only) — the
-    worker thread is lazy-started on the first ACTIVE event, so loading the
-    plug-in in CLI/config contexts spins up nothing.
+  * setup() registers a MASTER.PACKAGE_STATUS_UPDATE.POST listener and a
+    MASTER.INIT.POST listener — the worker thread is lazy-started on the
+    first enqueued job, so loading the plug-in in CLI/config contexts spins
+    up nothing.
   * on a sync success (new_status == "ACTIVE") it enqueues a measurement.
+  * on daemon startup it backfills a one-time measurement for every repo that
+    has no recorded sample yet, so its size shows up without waiting for its
+    next sync (idempotent across restarts: repos with a sample are skipped).
   * extend_web_status_fields() surfaces the latest cached size into status.json
     under web_status[pkgid]["plugins"]["statistics"].
 """
@@ -53,11 +57,46 @@ def _on_status(package, new_status) -> None:
     worker.get_worker().enqueue(package.pkgid, dst)
 
 
+def _on_init(*args, **kwargs) -> None:
+    """MASTER.INIT.POST listener: backfill repos with no recorded sample yet.
+
+    Runs once at daemon startup. For every enabled package with a configured
+    destination and no existing usage sample, enqueues a one-time measurement
+    so its size shows up without waiting for its next sync. Repos that already
+    have a sample are left alone, making this idempotent across restarts.
+    Never raises into the event path; failures are logged and swallowed.
+    """
+    try:
+        from . import storage, worker as worker_module
+        from .config import load_config
+
+        cfg = load_config()
+        db_path = cfg.db_path()
+        w = worker_module.get_worker()
+
+        import mirror
+
+        for pkgid in list(mirror.packages.keys()):
+            pkg = mirror.packages.get(pkgid)
+            if pkg is None or pkg.is_disabled() or not pkg.settings.dst:
+                continue
+
+            if storage.get_latest(db_path, pkgid) is not None:
+                continue
+
+            w.enqueue(pkgid, pkg.settings.dst)
+    except Exception as exc:
+        log.warning("Statistics startup backfill failed: %s", exc)
+
+
 def setup() -> None:
-    """Register the POST event listener. Starts no thread (see worker.py)."""
+    """Register the POST and INIT event listeners. Starts no thread itself
+    (see worker.py) — the worker lazy-starts on the first enqueue, which
+    _on_init only triggers when there is a repo missing a sample."""
     import mirror.event
 
     mirror.event.on("MASTER.PACKAGE_STATUS_UPDATE.POST", _on_status)
+    mirror.event.on("MASTER.INIT.POST", _on_init)
 
 
 def extend_web_status_fields(package) -> Optional[dict]:

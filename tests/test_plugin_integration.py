@@ -21,12 +21,15 @@ import mirror.plugin
 
 import mirror_plugin_statistics as statistics_plugin
 from conftest import make_package
+from mirror_plugin_statistics import config as config_module
+from mirror_plugin_statistics import storage
 from mirror_plugin_statistics import worker as worker_module
 from mirror_plugin_statistics.config import StatisticsConfig
-from mirror_plugin_statistics.storage import get_latest
+from mirror_plugin_statistics.storage import Sample, get_latest
 from mirror_plugin_statistics.util import format_bytes
 
 EVENT_NAME = "MASTER.PACKAGE_STATUS_UPDATE.POST"
+INIT_EVENT_NAME = "MASTER.INIT.POST"
 
 
 @pytest.fixture(autouse=True)
@@ -60,6 +63,7 @@ def test_setup_registers_post_listener() -> None:
         assert any(cb is statistics_plugin._on_status for _, cb in after)
     finally:
         mirror.event.off(EVENT_NAME, statistics_plugin._on_status)
+        mirror.event.off(INIT_EVENT_NAME, statistics_plugin._on_init)
 
 
 # ---------------------------------------------------------------------------
@@ -169,3 +173,108 @@ def test_process_refreshes_web_status_after_sample_insert(
     spy.assert_called_once()
     assert seen_at_refresh_time["latest"] is not None
     assert seen_at_refresh_time["latest"].bytes > 0
+
+
+# ---------------------------------------------------------------------------
+# setup() registers the INIT listener (startup backfill)
+# ---------------------------------------------------------------------------
+
+def test_setup_registers_init_listener() -> None:
+    record = statistics_plugin.plugin()
+    mirror.plugin._register_status(record)
+
+    before = mirror.event._manager._listeners.get(INIT_EVENT_NAME, [])
+    assert not any(cb is statistics_plugin._on_init for _, cb in before)
+
+    try:
+        record.setup()
+
+        after = mirror.event._manager._listeners.get(INIT_EVENT_NAME, [])
+        assert any(cb is statistics_plugin._on_init for _, cb in after)
+
+        post_after = mirror.event._manager._listeners.get(EVENT_NAME, [])
+        assert any(cb is statistics_plugin._on_status for _, cb in post_after)
+    finally:
+        mirror.event.off(INIT_EVENT_NAME, statistics_plugin._on_init)
+        mirror.event.off(EVENT_NAME, statistics_plugin._on_status)
+
+
+# ---------------------------------------------------------------------------
+# _on_init: startup backfill for repos with no recorded sample
+# ---------------------------------------------------------------------------
+
+class _FakePackages:
+    """Minimal mirror.packages stand-in exposing only .keys() and .get()."""
+
+    def __init__(self, packages: dict) -> None:
+        self._packages = packages
+
+    def keys(self) -> list:
+        return list(self._packages.keys())
+
+    def get(self, pkgid: str):
+        return self._packages.get(pkgid)
+
+
+def test_on_init_backfills_repos_without_existing_sample(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = StatisticsConfig(data_dir=tmp_path / "data", providers=["du"])
+    monkeypatch.setattr(config_module, "load_config", lambda: config)
+
+    already_dst = tmp_path / "already-repo"
+    already_dst.mkdir()
+    missing_dst = tmp_path / "missing-repo"
+    missing_dst.mkdir()
+
+    already_pkg = make_package(pkgid="already", dst=str(already_dst))
+    missing_pkg = make_package(pkgid="missing", dst=str(missing_dst))
+
+    storage.insert_sample(
+        config.db_path(),
+        Sample(pkgid="already", ts=time.time(), bytes=123, file_count=1, source="du"),
+    )
+
+    monkeypatch.setattr(
+        mirror,
+        "packages",
+        _FakePackages({"already": already_pkg, "missing": missing_pkg}),
+        raising=False,
+    )
+
+    calls: list[tuple[str, str]] = []
+    w = worker_module.get_worker()
+    monkeypatch.setattr(w, "enqueue", lambda pkgid, dst: calls.append((pkgid, dst)))
+
+    statistics_plugin._on_init()
+
+    assert calls == [("missing", str(missing_dst))]
+
+
+def test_on_init_skips_disabled_and_empty_dst_packages(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = StatisticsConfig(data_dir=tmp_path / "data", providers=["du"])
+    monkeypatch.setattr(config_module, "load_config", lambda: config)
+
+    disabled_dst = tmp_path / "disabled-repo"
+    disabled_dst.mkdir()
+    disabled_pkg = make_package(pkgid="disabled", dst=str(disabled_dst))
+    disabled_pkg.disabled = True
+
+    empty_dst_pkg = make_package(pkgid="empty-dst", dst="")
+
+    monkeypatch.setattr(
+        mirror,
+        "packages",
+        _FakePackages({"disabled": disabled_pkg, "empty-dst": empty_dst_pkg}),
+        raising=False,
+    )
+
+    calls: list[tuple[str, str]] = []
+    w = worker_module.get_worker()
+    monkeypatch.setattr(w, "enqueue", lambda pkgid, dst: calls.append((pkgid, dst)))
+
+    statistics_plugin._on_init()
+
+    assert calls == []
