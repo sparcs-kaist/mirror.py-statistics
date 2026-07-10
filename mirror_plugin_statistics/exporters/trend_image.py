@@ -7,12 +7,16 @@ a legend. The output is a valid standalone .svg viewable in any browser.
 
 from __future__ import annotations
 
+import logging
 import time
 from pathlib import Path
+from typing import Optional
 from xml.sax.saxutils import escape as _xml_escape
 
 from ..storage import Sample, get_all_latest, get_history
 from ..util import atomic_write_text, format_bytes
+
+log = logging.getLogger("mirror")
 
 # Default look-back window (days) when the exporter config omits "period_days".
 DEFAULT_PERIOD_DAYS: int = 30
@@ -150,6 +154,62 @@ def _render_svg(
     return "\n".join(parts)
 
 
+def _sanitize_pkgid_segment(pkgid: str) -> Optional[str]:
+    """Validate that a repo id is safe to use as a single path segment.
+
+    Rejects the empty string, "." and "..", and any id containing a path
+    separator ("/" or "\\") or a NUL byte, since any of these could let a
+    per-package path template escape the intended output directory.
+
+    Args:
+        pkgid(str): Raw repository id.
+
+    Return:
+        segment(Optional[str]): pkgid unchanged if safe to use as a path
+            segment, else None.
+    """
+    if not pkgid or pkgid in (".", ".."):
+        return None
+    if "/" in pkgid or "\\" in pkgid or "\x00" in pkgid:
+        return None
+    return pkgid
+
+
+def _export_per_package(
+    db_path: Path, raw_path: str, width: int, height: int, since_ts: float, until_ts: float
+) -> None:
+    """Render one trend SVG per repository, substituting the path template.
+
+    Internal helper. Repo ids that fail `_sanitize_pkgid_segment` are skipped
+    (with a warning logged) instead of being written, so an unsafe id cannot
+    escape the intended output directory. Repos with no history in the window
+    still get an empty-state SVG.
+
+    Args:
+        db_path(Path): SQLite database path.
+        raw_path(str): Path template containing "{pkgid}" and/or "{id}".
+        width(int): Canvas width in pixels.
+        height(int): Canvas height in pixels.
+        since_ts(float): Window start (x axis minimum).
+        until_ts(float): Window end (x axis maximum).
+    """
+    for pkgid in sorted(get_all_latest(db_path).keys()):
+        safe = _sanitize_pkgid_segment(pkgid)
+        if safe is None:
+            log.warning(
+                "trend_image: skipping repo %r with unsafe id for per-package export", pkgid
+            )
+            continue
+
+        target = raw_path.replace("{pkgid}", safe).replace("{id}", safe)
+        history = get_history(db_path, pkgid, since_ts=since_ts)
+        if history:
+            svg = _render_svg({pkgid: history}, width, height, since_ts, until_ts)
+        else:
+            svg = _render_empty_svg(width, height)
+        atomic_write_text(Path(target), svg)
+
+
 def export_trend_svg(db_path: Path, exporter_cfg: dict) -> None:
     """Render a usage-trend SVG atomically to exporter_cfg["path"].
 
@@ -157,6 +217,11 @@ def export_trend_svg(db_path: Path, exporter_cfg: dict) -> None:
     polyline per repo (bytes over time), with x (time) and y (bytes) axes and a
     legend. Y-axis labels use human-readable byte units. When there is no data
     in the window, still writes a valid SVG containing an empty-state message.
+
+    When "path" contains the placeholder "{pkgid}" or "{id}", one SVG is
+    rendered per repository instead (per-package mode), with the placeholder
+    substituted by a sanitized repo id; otherwise all repos are drawn together
+    into a single file at "path" (combined mode, unchanged).
 
     Args:
         db_path(Path): SQLite database path.
@@ -170,6 +235,11 @@ def export_trend_svg(db_path: Path, exporter_cfg: dict) -> None:
     until_ts = time.time()
     since_ts = until_ts - period_days * 86400
 
+    raw_path = exporter_cfg["path"]
+    if "{pkgid}" in raw_path or "{id}" in raw_path:
+        _export_per_package(db_path, raw_path, width, height, since_ts, until_ts)
+        return
+
     series: dict[str, list[Sample]] = {}
     for pkgid in sorted(get_all_latest(db_path).keys()):
         history = get_history(db_path, pkgid, since_ts=since_ts)
@@ -181,4 +251,4 @@ def export_trend_svg(db_path: Path, exporter_cfg: dict) -> None:
     else:
         svg = _render_empty_svg(width, height)
 
-    atomic_write_text(Path(exporter_cfg["path"]), svg)
+    atomic_write_text(Path(raw_path), svg)

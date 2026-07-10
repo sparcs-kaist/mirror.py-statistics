@@ -87,6 +87,12 @@ Example `statistics.json`:
 
 All fields are optional; omit the file to use the defaults above.
 
+`trend_image.path` may contain the placeholder `{pkgid}` (or its alias `{id}`),
+e.g. `"/var/www/geoul/pkgs/{pkgid}/du.svg"`, to write one SVG per repository
+instead of a single combined chart. Repo ids that would escape the target
+directory (empty, `.`, `..`, or containing `/` or `\`) are skipped with a
+warning.
+
 ## CLI
 
 The distribution ships a `mirror-statistics` command that reads the same DB:

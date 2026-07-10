@@ -134,6 +134,78 @@ def test_export_trend_svg_escapes_pkgid(tmp_path: Path) -> None:
     assert "pkg&lt;1&gt;&amp;2" in content
 
 
+def test_export_trend_svg_per_package_mode_writes_one_file_per_repo(tmp_path: Path) -> None:
+    db_path = tmp_path / "usage.sqlite3"
+    _seed_db(db_path)
+
+    export_trend_svg(
+        db_path, {"path": str(tmp_path / "pkgs/{pkgid}/du.svg"), "period_days": 30}
+    )
+
+    for pkgid in ("pkg1", "pkg2"):
+        out_path = tmp_path / "pkgs" / pkgid / "du.svg"
+        assert out_path.exists()
+        content = out_path.read_text(encoding="utf-8")
+        assert content
+        assert content.startswith("<svg")
+        assert "<polyline" in content
+        assert pkgid in content
+
+    pkg1_content = (tmp_path / "pkgs" / "pkg1" / "du.svg").read_text(encoding="utf-8")
+    pkg2_content = (tmp_path / "pkgs" / "pkg2" / "du.svg").read_text(encoding="utf-8")
+    assert "pkg2" not in pkg1_content
+    assert "pkg1" not in pkg2_content
+
+
+def test_export_trend_svg_per_package_mode_supports_id_alias(tmp_path: Path) -> None:
+    db_path = tmp_path / "usage.sqlite3"
+    insert_sample(db_path, _make_sample("solo", time.time(), 100))
+    insert_sample(db_path, _make_sample("solo", time.time() + 1, 200))
+
+    export_trend_svg(db_path, {"path": str(tmp_path / "pkgs/{id}/du.svg")})
+
+    out_path = tmp_path / "pkgs" / "solo" / "du.svg"
+    assert out_path.exists()
+    content = out_path.read_text(encoding="utf-8")
+    assert content.startswith("<svg")
+    assert "<polyline" in content
+    assert "solo" in content
+
+
+def test_export_trend_svg_per_package_mode_skips_traversal_ids(tmp_path: Path) -> None:
+    db_path = tmp_path / "usage.sqlite3"
+    insert_sample(db_path, _make_sample("a/b", time.time(), 100))
+    insert_sample(db_path, _make_sample("a/b", time.time() + 1, 200))
+    insert_sample(db_path, _make_sample("normal", time.time(), 100))
+    insert_sample(db_path, _make_sample("normal", time.time() + 1, 200))
+
+    export_trend_svg(db_path, {"path": str(tmp_path / "pkgs/{pkgid}/du.svg")})
+
+    assert not (tmp_path / "pkgs" / "a").exists()
+    assert not any(tmp_path.rglob("b*"))
+    normal_path = tmp_path / "pkgs" / "normal" / "du.svg"
+    assert normal_path.exists()
+    content = normal_path.read_text(encoding="utf-8")
+    assert content.startswith("<svg")
+    assert "<polyline" in content
+
+
+def test_export_trend_svg_combined_mode_unchanged_without_placeholder(tmp_path: Path) -> None:
+    db_path = tmp_path / "usage.sqlite3"
+    _seed_db(db_path)
+    out_path = tmp_path / "usage-trend.svg"
+
+    export_trend_svg(db_path, {"path": str(out_path)})
+
+    assert out_path.exists()
+    content = out_path.read_text(encoding="utf-8")
+    assert content.startswith("<svg")
+    assert "<polyline" in content
+    assert "pkg1" in content
+    assert "pkg2" in content
+    assert len(list(tmp_path.glob("*.svg"))) == 1
+
+
 # ---------------------------------------------------------------------------
 # export_prometheus
 # ---------------------------------------------------------------------------
