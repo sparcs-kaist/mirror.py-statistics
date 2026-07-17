@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
@@ -91,9 +93,27 @@ def test_export_trend_svg_with_data(tmp_path: Path) -> None:
     content = out_path.read_text(encoding="utf-8")
     assert content
     assert content.startswith("<svg") or content.startswith("<?xml")
+    ET.fromstring(content)
     assert "<polyline" in content
     assert "pkg1" in content
     assert "pkg2" in content
+
+    # Multi-series title.
+    assert ">Disk usage<" in content
+    # Area fill under each series' line.
+    assert "<polygon" in content
+    assert "fill-opacity=\"0.15\"" in content
+    # RRDtool-style GPRINT legend with a Cur/Min/Avg/Max row per series.
+    assert content.count("Cur:") == 2
+    assert "Min:" in content
+    assert "Avg:" in content
+    assert "Max:" in content
+    # Y-axis gridline/label (the 0-baseline tick is always present) and
+    # x-axis date tick labels (default 30-day window uses "%m/%d").
+    assert ">0 B<" in content
+    assert re.search(r"\d{2}/\d{2}", content)
+    # Bottom-right generation-time watermark.
+    assert "Generated " in content
 
 
 def test_export_trend_svg_no_data_still_valid(tmp_path: Path) -> None:
@@ -105,8 +125,12 @@ def test_export_trend_svg_no_data_still_valid(tmp_path: Path) -> None:
     content = out_path.read_text(encoding="utf-8")
     assert content
     assert content.startswith("<svg") or content.startswith("<?xml")
+    ET.fromstring(content)
     assert "<polyline" not in content
+    assert "<polygon" not in content
+    assert "Cur:" not in content
     assert "No data" in content
+    assert "No data available" in content
 
 
 def test_export_trend_svg_respects_period_days_window(tmp_path: Path) -> None:
@@ -134,6 +158,35 @@ def test_export_trend_svg_escapes_pkgid(tmp_path: Path) -> None:
     assert "pkg&lt;1&gt;&amp;2" in content
 
 
+def test_export_trend_svg_single_series_uses_repo_id_as_title(tmp_path: Path) -> None:
+    db_path = tmp_path / "usage.sqlite3"
+    insert_sample(db_path, _make_sample("solo", time.time(), 100))
+    out_path = tmp_path / "usage-trend.svg"
+
+    export_trend_svg(db_path, {"path": str(out_path)})
+
+    content = out_path.read_text(encoding="utf-8")
+    assert ">solo<" in content
+    assert ">Disk usage<" not in content
+
+
+def test_export_trend_svg_legend_reports_cur_min_avg_max(tmp_path: Path) -> None:
+    db_path = tmp_path / "usage.sqlite3"
+    now = time.time()
+    insert_sample(db_path, _make_sample("pkg1", now - 20, 100))
+    insert_sample(db_path, _make_sample("pkg1", now - 10, 300))
+    insert_sample(db_path, _make_sample("pkg1", now, 200))
+    out_path = tmp_path / "usage-trend.svg"
+
+    export_trend_svg(db_path, {"path": str(out_path)})
+
+    content = out_path.read_text(encoding="utf-8")
+    assert f"Cur: {format_bytes(200):>9}" in content
+    assert f"Min: {format_bytes(100):>9}" in content
+    assert f"Avg: {format_bytes(200):>9}" in content
+    assert f"Max: {format_bytes(300):>9}" in content
+
+
 def test_export_trend_svg_per_package_mode_writes_one_file_per_repo(tmp_path: Path) -> None:
     db_path = tmp_path / "usage.sqlite3"
     _seed_db(db_path)
@@ -150,6 +203,7 @@ def test_export_trend_svg_per_package_mode_writes_one_file_per_repo(tmp_path: Pa
         assert content.startswith("<svg")
         assert "<polyline" in content
         assert pkgid in content
+        assert f">{pkgid}<" in content  # per-package title is the repo's own id
 
     pkg1_content = (tmp_path / "pkgs" / "pkg1" / "du.svg").read_text(encoding="utf-8")
     pkg2_content = (tmp_path / "pkgs" / "pkg2" / "du.svg").read_text(encoding="utf-8")
