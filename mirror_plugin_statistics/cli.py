@@ -111,7 +111,10 @@ def main(ctx: click.Context, config_path: Path, data_dir: str | None) -> None:
         raw = {}
 
     data_dir_override = Path(data_dir) if data_dir is not None else None
-    cfg = config.resolve_config(raw, data_dir_override=data_dir_override)
+    try:
+        cfg = config.resolve_config(raw, data_dir_override=data_dir_override)
+    except ValueError as exc:
+        raise click.ClickException(f"Invalid statistics config: {exc}") from exc
 
     ctx.obj = {"config": cfg, "db_path": cfg.db_path()}
 
@@ -162,10 +165,14 @@ def export(ctx: click.Context) -> None:
         return
 
     failed = exporters.run_exporters(db_path, enabled)
-    for name, exporter_cfg in sorted(enabled.items()):
-        if name in failed:
+    failed_indexes = set(failed)
+    for index, exporter_cfg in enumerate(enabled):
+        if index in failed_indexes:
             continue
-        _print_line(f"{name}: {exporter_cfg['path']}")
+        _print_line(f"{exporter_cfg['type']}: {exporter_cfg['path']}")
 
     if failed:
-        raise click.ClickException(f"Exporters failed: {', '.join(sorted(failed))}")
+        descriptions = [
+            f"{enabled[index]['type']}: {enabled[index]['path']}" for index in failed
+        ]
+        raise click.ClickException(f"Exporters failed: {', '.join(descriptions)}")

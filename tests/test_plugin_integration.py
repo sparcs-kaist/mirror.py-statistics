@@ -9,6 +9,7 @@ via ``enqueue`` polled with a timeout), never through a real ``mirror`` sync.
 
 from __future__ import annotations
 
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -33,6 +34,41 @@ from mirror_plugin_statistics.util import format_bytes
 
 EVENT_NAME = "MASTER.PACKAGE_STATUS_UPDATE.POST"
 INIT_EVENT_NAME = "MASTER.INIT.POST"
+
+
+@pytest.mark.parametrize("invalid_exporters", [False, True])
+def test_worker_persists_measurement_with_list_exporter_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_exporters: bool
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "payload").write_bytes(b"x" * 4096)
+    output_paths = [tmp_path / "first.json", tmp_path / "second.json"]
+    raw = {
+        "data_dir": str(tmp_path / "data"),
+        "measure": {"providers": ["du"]},
+        "exporters": [
+            {"type": "json", "path": str(path)} for path in output_paths
+        ],
+    }
+    if invalid_exporters:
+        raw["exporters"] = {"json": {"path": str(output_paths[0])}}
+    monkeypatch.setattr(mirror.plugin, "get_config", lambda name: raw)
+    monkeypatch.setattr(mirror.config, "generate_and_save_web_status", lambda: None)
+
+    config = config_module.load_config()
+    worker = worker_module.MeasureWorker(config_loader=config_module.load_config)
+    worker._process("repo", str(repo), config)
+
+    latest = get_latest(config.db_path(), "repo")
+    assert latest is not None
+    assert latest.bytes > 0
+    for path in output_paths:
+        if invalid_exporters:
+            assert not path.exists()
+        else:
+            document = json.loads(path.read_text(encoding="utf-8"))
+            assert document["packages"]["repo"]["bytes"] == latest.bytes
 
 
 @pytest.fixture(autouse=True)

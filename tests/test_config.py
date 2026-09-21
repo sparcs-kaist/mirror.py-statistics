@@ -11,6 +11,7 @@ import mirror
 import mirror.plugin
 
 from mirror_plugin_statistics.config import (
+    DEFAULT_EXPORTERS,
     DEFAULT_PROVIDERS,
     DEFAULT_RETENTION_DAYS,
     default_config_dict,
@@ -100,11 +101,25 @@ def test_load_config_defaults_when_empty(monkeypatch: pytest.MonkeyPatch) -> Non
     assert cfg.retention_days == DEFAULT_RETENTION_DAYS
     assert cfg.providers == DEFAULT_PROVIDERS
     assert cfg.min_interval_seconds == 0
-    assert cfg.exporters["json"]["enabled"] is True
-    assert cfg.exporters["json"]["path"] == str(default_data_dir() / "usage.json")
-    assert cfg.exporters["trend_image"]["path"] == str(default_data_dir() / "usage-trend.svg")
-    assert cfg.exporters["prometheus"]["enabled"] is False
-    assert cfg.exporters["prometheus"]["path"] == str(default_data_dir() / "usage.prom")
+    assert cfg.exporters == [
+        {
+            "type": "json",
+            "enabled": True,
+            "history_points": 200,
+            "path": str(default_data_dir() / "usage.json"),
+        },
+        {
+            "type": "trend_image",
+            "enabled": True,
+            "period_days": 30,
+            "path": str(default_data_dir() / "usage-trend.svg"),
+        },
+        {
+            "type": "prometheus",
+            "enabled": False,
+            "path": str(default_data_dir() / "usage.prom"),
+        },
+    ]
 
 
 def test_load_config_applies_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -115,11 +130,11 @@ def test_load_config_applies_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path
             "min_interval_seconds": 60,
             "providers": ["du"],
         },
-        "exporters": {
-            "json": {"enabled": False},
-            "prometheus": {"enabled": True, "path": "/custom/usage.prom"},
-            "custom_exporter": {"enabled": True},
-        },
+        "exporters": [
+            {"type": "json", "enabled": False},
+            {"type": "prometheus", "path": "/custom/usage.prom"},
+            {"type": "custom_exporter"},
+        ],
     }
     monkeypatch.setattr(mirror.plugin, "get_config", lambda name: raw)
 
@@ -129,12 +144,24 @@ def test_load_config_applies_overrides(monkeypatch: pytest.MonkeyPatch, tmp_path
     assert cfg.retention_days == 30
     assert cfg.providers == ["du"]
     assert cfg.min_interval_seconds == 60
-    assert cfg.exporters["json"]["enabled"] is False
-    assert cfg.exporters["json"]["path"] == str(tmp_path / "usage.json")
-    assert cfg.exporters["prometheus"]["enabled"] is True
-    assert cfg.exporters["prometheus"]["path"] == "/custom/usage.prom"
-    assert cfg.exporters["custom_exporter"]["enabled"] is True
-    assert cfg.exporters["custom_exporter"]["path"] == str(tmp_path / "custom_exporter")
+    assert cfg.exporters == [
+        {
+            "type": "json",
+            "enabled": False,
+            "history_points": 200,
+            "path": str(tmp_path / "usage.json"),
+        },
+        {
+            "type": "prometheus",
+            "enabled": True,
+            "path": "/custom/usage.prom",
+        },
+        {
+            "type": "custom_exporter",
+            "enabled": True,
+            "path": str(tmp_path / "custom_exporter"),
+        },
+    ]
 
 
 def test_load_config_tolerates_bad_input(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -145,6 +172,27 @@ def test_load_config_tolerates_bad_input(monkeypatch: pytest.MonkeyPatch) -> Non
     assert cfg.retention_days == DEFAULT_RETENTION_DAYS
     assert cfg.providers == DEFAULT_PROVIDERS
     assert cfg.min_interval_seconds == 0
+
+
+def test_load_config_invalid_exporters_preserves_measurement_settings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    raw = {
+        "data_dir": str(tmp_path),
+        "retention_days": 30,
+        "measure": {"min_interval_seconds": 60, "providers": ["du"]},
+        "exporters": {"json": {"enabled": True}},
+    }
+    monkeypatch.setattr(mirror.plugin, "get_config", lambda name: raw)
+
+    cfg = load_config()
+
+    assert cfg.data_dir == tmp_path
+    assert cfg.retention_days == 30
+    assert cfg.providers == ["du"]
+    assert cfg.min_interval_seconds == 60
+    assert cfg.exporters == []
+    assert "Invalid statistics exporter configuration" in caplog.text
 
 
 def test_load_config_never_raises_on_get_config_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -166,16 +214,103 @@ def test_resolve_config_applies_data_dir_override_before_exporter_paths(tmp_path
     cfg = resolve_config(
         {
             "data_dir": str(tmp_path / "configured"),
-            "exporters": {
-                "trend_image": {"path": str(explicit)},
-            },
+            "exporters": [
+                {"type": "json"},
+                {"type": "trend_image", "path": str(explicit)},
+            ],
         },
         data_dir_override=override,
     )
 
     assert cfg.data_dir == override
-    assert cfg.exporters["json"]["path"] == str(override / "usage.json")
-    assert cfg.exporters["trend_image"]["path"] == str(explicit)
+    assert cfg.exporters[0]["path"] == str(override / "usage.json")
+    assert cfg.exporters[1]["path"] == str(explicit)
+
+
+def test_resolve_config_empty_exporters_disables_all() -> None:
+    cfg = resolve_config({"exporters": []})
+
+    assert cfg.exporters == []
+    assert cfg.enabled_exporters() == []
+
+
+def test_resolve_config_explicit_list_does_not_add_default_exporters() -> None:
+    cfg = resolve_config({"exporters": [{"type": "json"}]})
+
+    assert [settings["type"] for settings in cfg.exporters] == ["json"]
+    assert cfg.exporters[0]["history_points"] == 200
+
+
+def test_resolve_config_preserves_duplicate_exporters_and_order(tmp_path: Path) -> None:
+    cfg = resolve_config(
+        {
+            "exporters": [
+                {"type": "json", "path": str(tmp_path / "first.json")},
+                {"type": "prometheus", "enabled": False},
+                {"type": "json", "path": str(tmp_path / "second.json")},
+            ]
+        }
+    )
+
+    assert [settings["type"] for settings in cfg.exporters] == [
+        "json",
+        "prometheus",
+        "json",
+    ]
+    assert [settings["path"] for settings in cfg.enabled_exporters()] == [
+        str(tmp_path / "first.json"),
+        str(tmp_path / "second.json"),
+    ]
+
+
+def test_resolve_config_omitted_enabled_defaults_true_for_every_type() -> None:
+    cfg = resolve_config(
+        {
+            "exporters": [
+                {"type": "json"},
+                {"type": "trend_image"},
+                {"type": "prometheus"},
+            ]
+        }
+    )
+
+    assert all(settings["enabled"] is True for settings in cfg.exporters)
+    assert cfg.exporters[0]["history_points"] == 200
+    assert cfg.exporters[1]["period_days"] == 30
+
+
+def test_resolve_config_does_not_mutate_input_or_defaults() -> None:
+    raw_exporters = [{"type": "json"}]
+
+    cfg = resolve_config({"exporters": raw_exporters})
+    cfg.exporters[0]["history_points"] = 1
+
+    assert raw_exporters == [{"type": "json"}]
+    assert DEFAULT_EXPORTERS[0]["history_points"] == 200
+    assert "path" not in DEFAULT_EXPORTERS[0]
+
+
+@pytest.mark.parametrize(
+    ("exporters", "message"),
+    [
+        (None, "exporters must be a list"),
+        ({"json": {}}, "migrate the legacy object entries"),
+        ([None], r"exporters\[0\] must be an object"),
+        ([{}], r"exporters\[0\]\.type must be a non-empty string"),
+        ([{"type": 1}], r"exporters\[0\]\.type must be a non-empty string"),
+        ([{"type": ""}], r"exporters\[0\]\.type must be a non-empty string"),
+        ([{"type": "   "}], r"exporters\[0\]\.type must be a non-empty string"),
+        (
+            [{"type": "json", "enabled": 1}],
+            r"exporters\[0\]\.enabled must be a boolean",
+        ),
+    ],
+)
+def test_resolve_config_rejects_invalid_exporters(
+    exporters: object, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        resolve_config({"exporters": exporters})
 
 
 # ---------------------------------------------------------------------------
@@ -192,8 +327,31 @@ def test_default_config_dict_shape() -> None:
         "min_interval_seconds": 0,
         "providers": list(DEFAULT_PROVIDERS),
     }
-    assert data["exporters"]["json"]["path"] == str(data_dir / "usage.json")
-    assert data["exporters"]["trend_image"]["path"] == str(data_dir / "usage-trend.svg")
-    assert data["exporters"]["prometheus"]["path"] == str(data_dir / "usage.prom")
-    assert data["exporters"]["json"]["enabled"] is True
-    assert data["exporters"]["prometheus"]["enabled"] is False
+    assert data["exporters"] == [
+        {
+            "type": "json",
+            "enabled": True,
+            "history_points": 200,
+            "path": str(data_dir / "usage.json"),
+        },
+        {
+            "type": "trend_image",
+            "enabled": True,
+            "period_days": 30,
+            "path": str(data_dir / "usage-trend.svg"),
+        },
+        {
+            "type": "prometheus",
+            "enabled": False,
+            "path": str(data_dir / "usage.prom"),
+        },
+    ]
+
+
+def test_default_config_dict_roundtrips_through_resolver() -> None:
+    data = default_config_dict()
+
+    cfg = resolve_config(data)
+
+    assert cfg.data_dir == Path(data["data_dir"])
+    assert cfg.exporters == data["exporters"]

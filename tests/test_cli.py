@@ -54,11 +54,11 @@ def test_cli_data_dir_override_rebases_only_default_exporter_paths(
         tmp_path / "config",
         {
             "data_dir": str(configured_data_dir),
-            "exporters": {
-                "json": {"enabled": True},
-                "trend_image": {"enabled": True, "path": str(explicit_path)},
-                "prometheus": {"enabled": False},
-            },
+            "exporters": [
+                {"type": "json"},
+                {"type": "trend_image", "path": str(explicit_path)},
+                {"type": "prometheus", "enabled": False},
+            ],
         },
     )
     calls: dict[str, tuple[Path, dict]] = {}
@@ -89,6 +89,7 @@ def test_cli_data_dir_override_rebases_only_default_exporter_paths(
     assert calls["json"] == (
         override_data_dir / "usage.sqlite3",
         {
+            "type": "json",
             "enabled": True,
             "history_points": 200,
             "path": str(override_data_dir / "usage.json"),
@@ -108,29 +109,85 @@ def test_cli_export_reports_partial_failures_and_prints_only_successes(
         tmp_path / "config",
         {
             "data_dir": str(tmp_path / "data"),
-            "exporters": {
-                "json": {"enabled": True},
-                "trend_image": {"enabled": False},
-                "broken": {"enabled": True},
-                "unknown": {"enabled": True},
-            },
+            "exporters": [
+                {"type": "json", "path": str(tmp_path / "first.json")},
+                {"type": "json", "path": str(tmp_path / "second.json")},
+                {"type": "unknown", "path": str(tmp_path / "unknown.out")},
+                {"type": "trend_image", "enabled": False},
+            ],
         },
     )
     output: list[str] = []
+    calls: list[Path] = []
 
-    monkeypatch.setitem(exporters.EXPORTERS, "json", lambda db_path, cfg: None)
     monkeypatch.setattr(cli, "_print_line", lambda text, style="": output.append(text))
 
-    def _fail(db_path: Path, exporter_config: dict) -> None:
-        raise RuntimeError("boom")
+    def _export(db_path: Path, exporter_config: dict) -> None:
+        output_path = Path(exporter_config["path"])
+        calls.append(output_path)
+        if output_path.name == "first.json":
+            raise RuntimeError("boom")
 
-    monkeypatch.setitem(exporters.EXPORTERS, "broken", _fail)
+    monkeypatch.setitem(exporters.EXPORTERS, "json", _export)
 
     result = CliRunner().invoke(cli.main, ["--config", str(main_config), "export"])
 
     assert result.exit_code != 0
-    assert output == [f"json: {tmp_path / 'data' / 'usage.json'}"]
-    assert "Exporters failed: broken, unknown" in result.stderr
+    assert calls == [tmp_path / "first.json", tmp_path / "second.json"]
+    assert output == [f"json: {tmp_path / 'second.json'}"]
+    assert f"json: {tmp_path / 'first.json'}" in result.stderr
+    assert f"unknown: {tmp_path / 'unknown.out'}" in result.stderr
+
+
+def test_cli_export_with_empty_exporter_list_does_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    main_config = _write_statistics_config(
+        tmp_path / "config",
+        {"data_dir": str(tmp_path / "data"), "exporters": []},
+    )
+    output: list[str] = []
+
+    monkeypatch.setattr(cli, "_print_line", lambda text, style="": output.append(text))
+    monkeypatch.setattr(
+        exporters,
+        "run_exporters",
+        lambda db_path, enabled: pytest.fail("run_exporters should not be called"),
+    )
+
+    result = CliRunner().invoke(cli.main, ["--config", str(main_config), "export"])
+
+    assert result.exit_code == 0
+    assert output == ["No exporters enabled."]
+
+
+def test_cli_rejects_legacy_exporter_mapping_before_export(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    main_config = _write_statistics_config(
+        tmp_path / "config",
+        {
+            "data_dir": str(tmp_path / "data"),
+            "exporters": {"json": {"path": str(tmp_path / "usage.json")}},
+        },
+    )
+    output: list[str] = []
+
+    monkeypatch.setattr(cli, "_print_line", lambda text, style="": output.append(text))
+    monkeypatch.setattr(
+        exporters,
+        "run_exporters",
+        lambda db_path, enabled: pytest.fail("run_exporters should not be called"),
+    )
+
+    result = CliRunner().invoke(cli.main, ["--config", str(main_config), "export"])
+
+    assert result.exit_code != 0
+    assert output == []
+    assert not (tmp_path / "usage.json").exists()
+    assert "Invalid statistics config" in result.stderr
 
 
 def test_cli_missing_statistics_config_uses_defaults(

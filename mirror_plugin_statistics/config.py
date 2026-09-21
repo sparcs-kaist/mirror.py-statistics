@@ -28,14 +28,14 @@ DEFAULT_STATE_SUBDIR: str = "statistics"
 
 DB_FILENAME: str = "usage.sqlite3"
 
-# Default exporter set. Keys are exporter names (must match the exporters
-# registry). Each value carries an ``enabled`` flag plus exporter-specific
+# Default exporter set. Each entry names an exporter type (which must match the
+# exporters registry) and carries an ``enabled`` flag plus exporter-specific
 # extras. ``path`` defaults (when omitted) to ``<data_dir>/<default filename>``.
-DEFAULT_EXPORTERS: dict[str, dict] = {
-    "json": {"enabled": True, "history_points": 200},
-    "trend_image": {"enabled": True, "period_days": 30},
-    "prometheus": {"enabled": False},
-}
+DEFAULT_EXPORTERS: list[dict] = [
+    {"type": "json", "enabled": True, "history_points": 200},
+    {"type": "trend_image", "enabled": True, "period_days": 30},
+    {"type": "prometheus", "enabled": False},
+]
 
 # Default output filename per exporter, joined onto data_dir when the operator
 # does not set an explicit "path".
@@ -56,23 +56,23 @@ class StatisticsConfig:
         providers(list[str]): Measurement provider priority order.
         min_interval_seconds(int): Minimum seconds between re-measuring the same
             repo; 0 disables throttling.
-        exporters(dict[str, dict]): Exporter name -> resolved settings dict
-            (always contains "enabled" and "path").
+        exporters(list[dict]): Ordered resolved exporter settings. Every entry
+            contains "type", "enabled", and "path".
     """
 
     data_dir: Path
     retention_days: int = DEFAULT_RETENTION_DAYS
     providers: list[str] = field(default_factory=lambda: list(DEFAULT_PROVIDERS))
     min_interval_seconds: int = 0
-    exporters: dict[str, dict] = field(default_factory=dict)
+    exporters: list[dict] = field(default_factory=list)
 
     def db_path(self) -> Path:
         """Return the SQLite database path (``<data_dir>/usage.sqlite3``)."""
         return self.data_dir / DB_FILENAME
 
-    def enabled_exporters(self) -> dict[str, dict]:
-        """Return the subset of exporters whose ``enabled`` flag is true."""
-        return {name: cfg for name, cfg in self.exporters.items() if cfg.get("enabled")}
+    def enabled_exporters(self) -> list[dict]:
+        """Return enabled exporters in configured order, including duplicates."""
+        return [cfg for cfg in self.exporters if cfg.get("enabled")]
 
 
 def default_data_dir() -> Path:
@@ -135,29 +135,56 @@ def _exporter_output_path(name: str, path_value: object, data_dir: Path) -> str:
     return str(data_dir / default_filename)
 
 
-def _resolve_exporters(raw_exporters: object, data_dir: Path) -> dict[str, dict]:
-    """Merge raw exporter overrides over DEFAULT_EXPORTERS and resolve paths.
+def _resolve_exporters(raw_exporters: object, data_dir: Path) -> list[dict]:
+    """Validate and resolve an ordered exporter configuration list.
 
     Args:
-        raw_exporters(object): Raw "exporters" value from config (may be missing/invalid).
+        raw_exporters(object): Raw "exporters" value from config.
         data_dir(Path): Base data directory used for default exporter paths.
 
     Return:
-        exporters(dict[str, dict]): Exporter name -> resolved settings, each
-            guaranteed to carry "enabled" (bool) and "path" (str) keys.
-    """
-    resolved: dict[str, dict] = copy.deepcopy(DEFAULT_EXPORTERS)
-    if isinstance(raw_exporters, dict):
-        for name, overrides in raw_exporters.items():
-            if not isinstance(overrides, dict):
-                continue
-            merged = dict(resolved.get(name, {}))
-            merged.update(overrides)
-            resolved[name] = merged
+        exporters(list[dict]): Ordered resolved exporter settings, each carrying
+            "type" (str), "enabled" (bool), and "path" (str) keys.
 
-    for name, settings in resolved.items():
-        settings["enabled"] = bool(settings.get("enabled", False))
-        settings["path"] = _exporter_output_path(name, settings.get("path"), data_dir)
+    Raises:
+        ValueError: The exporter collection or one of its entries is invalid.
+    """
+    if isinstance(raw_exporters, dict):
+        raise ValueError(
+            "exporters must be a list; migrate the legacy object entries to "
+            'list items with a "type" field'
+        )
+    if not isinstance(raw_exporters, list):
+        raise ValueError("exporters must be a list")
+
+    type_defaults = {
+        entry["type"]: {
+            key: copy.deepcopy(value)
+            for key, value in entry.items()
+            if key not in {"type", "enabled"}
+        }
+        for entry in DEFAULT_EXPORTERS
+    }
+    resolved: list[dict] = []
+    for index, raw_settings in enumerate(raw_exporters):
+        if not isinstance(raw_settings, dict):
+            raise ValueError(f"exporters[{index}] must be an object")
+
+        exporter_type = raw_settings.get("type")
+        if not isinstance(exporter_type, str) or not exporter_type.strip():
+            raise ValueError(
+                f'exporters[{index}].type must be a non-empty string'
+            )
+        if "enabled" in raw_settings and not isinstance(raw_settings["enabled"], bool):
+            raise ValueError(f"exporters[{index}].enabled must be a boolean")
+
+        settings = copy.deepcopy(type_defaults.get(exporter_type, {}))
+        settings.update(copy.deepcopy(raw_settings))
+        settings["enabled"] = raw_settings.get("enabled", True)
+        settings["path"] = _exporter_output_path(
+            exporter_type, settings.get("path"), data_dir
+        )
+        resolved.append(settings)
 
     return resolved
 
@@ -172,6 +199,10 @@ def resolve_config(raw: object, data_dir_override: Path | None = None) -> Statis
 
     Return:
         config(StatisticsConfig): Fully resolved configuration.
+
+    Raises:
+        ValueError: The ``exporters`` collection or one of its entries is
+            invalid.
     """
     if not isinstance(raw, dict):
         raw = {}
@@ -187,7 +218,7 @@ def resolve_config(raw: object, data_dir_override: Path | None = None) -> Statis
         retention_days=_coerce_retention_days(raw.get("retention_days")),
         providers=_coerce_provider_list(measure_raw.get("providers")),
         min_interval_seconds=_coerce_min_interval_seconds(measure_raw.get("min_interval_seconds")),
-        exporters=_resolve_exporters(raw.get("exporters"), data_dir),
+        exporters=_resolve_exporters(raw.get("exporters", DEFAULT_EXPORTERS), data_dir),
     )
 
 
@@ -197,8 +228,9 @@ def load_config() -> StatisticsConfig:
     Reads ``mirror.plugin.get_config(NAME)`` and layers it over DEFAULT_*.
     Resolves ``data_dir`` (default default_data_dir()), each exporter's
     ``enabled`` and ``path`` (default ``data_dir/<EXPORTER_DEFAULT_FILENAME>``),
-    and the provider order. Never raises on a bad/missing operator file — falls
-    back to defaults (get_config already returns {} on error).
+    and the provider order. Invalid exporter configuration disables exporting
+    while preserving the other resolved settings. Errors loading the operator
+    file fall back to defaults.
 
     Return:
         config(StatisticsConfig): Fully resolved configuration.
@@ -211,7 +243,13 @@ def load_config() -> StatisticsConfig:
         log.warning("Failed to load statistics plug-in config, using defaults: %s", exc)
         raw = {}
 
-    return resolve_config(raw)
+    try:
+        return resolve_config(raw)
+    except ValueError as exc:
+        log.warning("Invalid statistics exporter configuration; disabling exporters: %s", exc)
+        fallback_raw = dict(raw) if isinstance(raw, dict) else {}
+        fallback_raw["exporters"] = []
+        return resolve_config(fallback_raw)
 
 
 def default_config_dict() -> dict:
@@ -226,7 +264,8 @@ def default_config_dict() -> dict:
     data_dir = default_data_dir()
 
     exporters = copy.deepcopy(DEFAULT_EXPORTERS)
-    for name, settings in exporters.items():
+    for settings in exporters:
+        name = settings["type"]
         settings["path"] = _exporter_output_path(name, None, data_dir)
 
     return {

@@ -316,17 +316,19 @@ def test_run_exporters_skips_unknown_and_isolates_failure(
     with caplog.at_level(logging.WARNING, logger="mirror"):
         failed = run_exporters(
             db_path,
-            {
-                "unknown": {"path": str(tmp_path / "unknown.out")},
-                "failing": {"path": str(tmp_path / "failing.out")},
-                "ok": {"path": str(tmp_path / "ok.out")},
-            },
+            [
+                {"type": "unknown", "path": str(tmp_path / "unknown.out")},
+                {"type": "failing", "path": str(tmp_path / "failing.out")},
+                {"type": "ok", "path": str(tmp_path / "ok.out")},
+            ],
         )
 
     assert calls == ["failing", "ok"]
-    assert failed == ["unknown", "failing"]
+    assert failed == [0, 1]
     assert any("unknown" in message for message in caplog.messages)
+    assert any("unknown.out" in message for message in caplog.messages)
     assert any("failing" in message for message in caplog.messages)
+    assert any("failing.out" in message for message in caplog.messages)
 
 
 def test_run_exporters_runs_real_exporters_end_to_end(tmp_path: Path) -> None:
@@ -335,14 +337,19 @@ def test_run_exporters_runs_real_exporters_end_to_end(tmp_path: Path) -> None:
 
     failed = run_exporters(
         db_path,
-        {
-            "json": {"path": str(tmp_path / "usage.json")},
-            "trend_image": {"path": str(tmp_path / "usage-trend.svg")},
-            "prometheus": {"path": str(tmp_path / "usage.prom")},
-        },
+        [
+            {"type": "json", "path": str(tmp_path / "usage.json")},
+            {"type": "json", "path": str(tmp_path / "usage-copy.json")},
+            {"type": "trend_image", "path": str(tmp_path / "usage-trend.svg")},
+            {"type": "prometheus", "path": str(tmp_path / "usage.prom")},
+        ],
     )
 
     assert (tmp_path / "usage.json").exists()
+    assert (tmp_path / "usage-copy.json").exists()
+    assert json.loads((tmp_path / "usage-copy.json").read_text(encoding="utf-8"))[
+        "packages"
+    ] == json.loads((tmp_path / "usage.json").read_text(encoding="utf-8"))["packages"]
     assert (tmp_path / "usage-trend.svg").exists()
     assert (tmp_path / "usage.prom").exists()
     assert failed == []

@@ -77,17 +77,27 @@ Example `statistics.json`:
   "data_dir": "/var/lib/mirror/statistics",
   "retention_days": 365,
   "measure": { "min_interval_seconds": 0, "providers": ["zfs", "btrfs", "xfs-quota", "du"] },
-  "exporters": {
-    "json":        { "enabled": true,  "path": "/var/lib/mirror/statistics/usage.json", "history_points": 200 },
-    "trend_image": { "enabled": true,  "path": "/var/lib/mirror/statistics/usage-trend.svg", "period_days": 30 },
-    "prometheus":  { "enabled": false, "path": "/var/lib/mirror/statistics/usage.prom" }
-  }
+  "exporters": [
+    { "type": "json", "enabled": true, "path": "/var/lib/mirror/statistics/usage.json", "history_points": 200 },
+    { "type": "trend_image", "enabled": true, "path": "/var/lib/mirror/statistics/usage-trend.svg", "period_days": 30 },
+    { "type": "prometheus", "enabled": false, "path": "/var/lib/mirror/statistics/usage.prom" }
+  ]
 }
 ```
 
-All fields are optional; omit the file to use the defaults above.
+Top-level fields are optional; omit the file to use the defaults above.
+When `exporters` is present, it replaces the default list. Each entry requires
+`type` (`json`, `trend_image`, or `prometheus`) and defaults to `enabled: true`.
+Entries run in list order; the same type can appear multiple times with different
+output paths. Use `"exporters": []` to disable all file exporters.
 
-`trend_image.path` may contain the placeholder `{pkgid}` (or its alias `{id}`),
+Only the array format is supported. Migrate an old entry such as
+`"exporters": {"json": {"path": "/srv/usage.json"}}` to
+`"exporters": [{"type": "json", "path": "/srv/usage.json"}]`.
+Invalid exporter structure causes the CLI to report an error; the daemon logs
+the error and disables file exporters while continuing measurement and storage.
+
+The `path` of a `trend_image` entry may contain `{pkgid}` (or its alias `{id}`),
 e.g. `"/var/www/geoul/pkgs/{pkgid}/du.svg"`, to write one SVG per repository
 instead of a single combined chart. Repo ids that would escape the target
 directory (empty, `.`, `..`, or containing `/` or `\`) are skipped with a

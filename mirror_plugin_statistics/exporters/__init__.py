@@ -31,28 +31,40 @@ EXPORTERS: dict[str, Callable[[Path, dict], None]] = {
 }
 
 
-def run_exporters(db_path: Path, enabled_exporters: dict[str, dict]) -> list[str]:
+def run_exporters(db_path: Path, enabled_exporters: list[dict]) -> list[int]:
     """Run every enabled, known exporter, isolating failures.
 
     Args:
         db_path(Path): SQLite database path.
-        enabled_exporters(dict[str, dict]): Mapping of exporter name -> resolved
-            settings dict (each with a "path"). Names not in EXPORTERS are
+        enabled_exporters(list[dict]): Ordered resolved exporter settings. Each
+            entry contains a "type" and "path". Types not in EXPORTERS are
             logged and skipped.
 
     Return:
-        failed(list[str]): Names of unknown exporters and exporters that raised.
+        failed(list[int]): Indexes of unknown exporters and exporters that
+            raised.
     """
-    failed: list[str] = []
-    for name, exporter_cfg in enabled_exporters.items():
-        exporter = EXPORTERS.get(name)
+    failed: list[int] = []
+    for index, exporter_cfg in enumerate(enabled_exporters):
+        exporter_type = exporter_cfg["type"]
+        output_path = exporter_cfg["path"]
+        exporter = EXPORTERS.get(exporter_type)
         if exporter is None:
-            log.warning("Unknown statistics exporter %r; skipping", name)
-            failed.append(name)
+            log.warning(
+                "Unknown statistics exporter type %r for path %r; skipping",
+                exporter_type,
+                output_path,
+            )
+            failed.append(index)
             continue
         try:
             exporter(db_path, exporter_cfg)
         except Exception as exc:
-            log.warning("Statistics exporter %r failed: %s", name, exc)
-            failed.append(name)
+            log.warning(
+                "Statistics exporter type %r for path %r failed: %s",
+                exporter_type,
+                output_path,
+                exc,
+            )
+            failed.append(index)
     return failed
