@@ -31,7 +31,7 @@ EXPORTERS: dict[str, Callable[[Path, dict], None]] = {
 }
 
 
-def run_exporters(db_path: Path, enabled_exporters: dict[str, dict]) -> None:
+def run_exporters(db_path: Path, enabled_exporters: dict[str, dict]) -> list[str]:
     """Run every enabled, known exporter, isolating failures.
 
     Args:
@@ -39,13 +39,20 @@ def run_exporters(db_path: Path, enabled_exporters: dict[str, dict]) -> None:
         enabled_exporters(dict[str, dict]): Mapping of exporter name -> resolved
             settings dict (each with a "path"). Names not in EXPORTERS are
             logged and skipped.
+
+    Return:
+        failed(list[str]): Names of unknown exporters and exporters that raised.
     """
+    failed: list[str] = []
     for name, exporter_cfg in enabled_exporters.items():
         exporter = EXPORTERS.get(name)
         if exporter is None:
             log.warning("Unknown statistics exporter %r; skipping", name)
+            failed.append(name)
             continue
         try:
             exporter(db_path, exporter_cfg)
         except Exception as exc:
             log.warning("Statistics exporter %r failed: %s", name, exc)
+            failed.append(name)
+    return failed

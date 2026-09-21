@@ -10,7 +10,9 @@ via ``enqueue`` polled with a timeout), never through a real ``mirror`` sync.
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from unittest.mock import MagicMock
 
 import pytest
@@ -25,6 +27,7 @@ from mirror_plugin_statistics import config as config_module
 from mirror_plugin_statistics import storage
 from mirror_plugin_statistics import worker as worker_module
 from mirror_plugin_statistics.config import StatisticsConfig
+from mirror_plugin_statistics.measure.providers import MeasureResult
 from mirror_plugin_statistics.storage import Sample, get_latest
 from mirror_plugin_statistics.util import format_bytes
 
@@ -143,6 +146,54 @@ def test_extend_web_status_fields_none_when_never_measured(
     package = make_package(pkgid="never-measured", dst="/srv/ftp/never-measured")
 
     assert statistics_plugin.extend_web_status_fields(package) is None
+
+
+@pytest.mark.parametrize("has_old_sample", [False, True])
+def test_cold_cache_read_preserves_concurrent_measurement(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, has_old_sample: bool
+) -> None:
+    config = StatisticsConfig(data_dir=tmp_path / "data", providers=["du"])
+    pkgid = "concurrent-repo"
+    if has_old_sample:
+        storage.insert_sample(
+            config.db_path(),
+            Sample(
+                pkgid=pkgid, ts=time.time() - 60, bytes=100,
+                file_count=None, source="du",
+            ),
+        )
+
+    read_finished = Event()
+    measurement_finished = Event()
+
+    def read_delayed_sample(db_path: Path, repo_id: str) -> Sample | None:
+        sample = get_latest(db_path, repo_id)
+        read_finished.set()
+        assert measurement_finished.wait(timeout=5)
+        return sample
+
+    monkeypatch.setattr(storage, "get_latest", read_delayed_sample)
+    monkeypatch.setattr(
+        worker_module, "measure_usage",
+        lambda dst, providers: MeasureResult(bytes=200, file_count=None, source="du"),
+    )
+    monkeypatch.setattr(mirror.config, "generate_and_save_web_status", lambda: None)
+    worker = worker_module.MeasureWorker(config_loader=lambda: config)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        pending_read = executor.submit(worker.get_cached, pkgid)
+        try:
+            assert read_finished.wait(timeout=5)
+            worker._process(pkgid, str(tmp_path / "repo"), config)
+        finally:
+            measurement_finished.set()
+        returned = pending_read.result(timeout=5)
+
+    latest = get_latest(config.db_path(), pkgid)
+    assert latest is not None
+    assert latest.bytes == 200
+    assert returned == latest
+    assert worker.get_cached(pkgid) == latest
 
 
 # ---------------------------------------------------------------------------

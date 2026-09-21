@@ -103,6 +103,11 @@ mirror-statistics history <pkgid>      # recorded history for one repo
 mirror-statistics export               # re-run all enabled exporters now
 ```
 
+By default, the CLI reads `statistics.json` next to `/etc/mirror/config.json`.
+Use `--config PATH` when the main config is elsewhere. `--data-dir PATH`
+overrides the database directory and default exporter paths; exporter paths
+explicitly set in `statistics.json` are preserved.
+
 ## Uninstall
 
 ```bash

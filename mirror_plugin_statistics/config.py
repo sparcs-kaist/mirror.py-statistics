@@ -162,8 +162,37 @@ def _resolve_exporters(raw_exporters: object, data_dir: Path) -> dict[str, dict]
     return resolved
 
 
+def resolve_config(raw: object, data_dir_override: Path | None = None) -> StatisticsConfig:
+    """Resolve a raw statistics config mapping over the defaults.
+
+    Args:
+        raw(object): Decoded statistics.json content.
+        data_dir_override(Path | None): Optional data directory override applied
+            before default exporter paths are resolved.
+
+    Return:
+        config(StatisticsConfig): Fully resolved configuration.
+    """
+    if not isinstance(raw, dict):
+        raw = {}
+
+    data_dir = data_dir_override if data_dir_override is not None else _resolve_data_dir(raw)
+
+    measure_raw = raw.get("measure")
+    if not isinstance(measure_raw, dict):
+        measure_raw = {}
+
+    return StatisticsConfig(
+        data_dir=data_dir,
+        retention_days=_coerce_retention_days(raw.get("retention_days")),
+        providers=_coerce_provider_list(measure_raw.get("providers")),
+        min_interval_seconds=_coerce_min_interval_seconds(measure_raw.get("min_interval_seconds")),
+        exporters=_resolve_exporters(raw.get("exporters"), data_dir),
+    )
+
+
 def load_config() -> StatisticsConfig:
-    """Load and resolve the statistics config from the operator's file + defaults.
+    """Load and resolve the daemon's statistics config over the defaults.
 
     Reads ``mirror.plugin.get_config(NAME)`` and layers it over DEFAULT_*.
     Resolves ``data_dir`` (default default_data_dir()), each exporter's
@@ -182,22 +211,7 @@ def load_config() -> StatisticsConfig:
         log.warning("Failed to load statistics plug-in config, using defaults: %s", exc)
         raw = {}
 
-    if not isinstance(raw, dict):
-        raw = {}
-
-    data_dir = _resolve_data_dir(raw)
-
-    measure_raw = raw.get("measure")
-    if not isinstance(measure_raw, dict):
-        measure_raw = {}
-
-    return StatisticsConfig(
-        data_dir=data_dir,
-        retention_days=_coerce_retention_days(raw.get("retention_days")),
-        providers=_coerce_provider_list(measure_raw.get("providers")),
-        min_interval_seconds=_coerce_min_interval_seconds(measure_raw.get("min_interval_seconds")),
-        exporters=_resolve_exporters(raw.get("exporters"), data_dir),
-    )
+    return resolve_config(raw)
 
 
 def default_config_dict() -> dict:

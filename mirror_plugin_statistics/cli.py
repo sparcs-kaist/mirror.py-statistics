@@ -11,6 +11,7 @@ support styling.
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from datetime import datetime, timezone
@@ -24,6 +25,8 @@ from . import config, exporters, storage
 from .util import format_bytes
 
 log = logging.getLogger("mirror")
+
+DEFAULT_CONFIG_PATH = Path("/etc/mirror/config.json")
 
 
 def _styling_supported() -> bool:
@@ -83,21 +86,32 @@ def _format_ts(ts: float) -> str:
 
 @click.group()
 @click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=DEFAULT_CONFIG_PATH,
+    show_default=True,
+    help="Path to mirror.py's main config.json.",
+)
+@click.option(
     "--data-dir",
     default=None,
     help="Override the statistics data directory (else taken from config).",
 )
 @click.pass_context
-def main(ctx: click.Context, data_dir: str | None) -> None:
+def main(ctx: click.Context, config_path: Path, data_dir: str | None) -> None:
     """Inspect and render mirror.py per-repository disk-usage statistics."""
+    statistics_path = config_path.parent / "statistics.json"
     try:
-        cfg = config.load_config()
-    except Exception as exc:
+        raw = json.loads(statistics_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raw = {}
+    except (OSError, ValueError) as exc:
         log.warning("Failed to load statistics config, using defaults: %s", exc)
-        cfg = config.StatisticsConfig(data_dir=config.default_data_dir())
+        raw = {}
 
-    if data_dir is not None:
-        cfg.data_dir = Path(data_dir)
+    data_dir_override = Path(data_dir) if data_dir is not None else None
+    cfg = config.resolve_config(raw, data_dir_override=data_dir_override)
 
     ctx.obj = {"config": cfg, "db_path": cfg.db_path()}
 
@@ -147,6 +161,11 @@ def export(ctx: click.Context) -> None:
         _print_line("No exporters enabled.")
         return
 
-    exporters.run_exporters(db_path, enabled)
+    failed = exporters.run_exporters(db_path, enabled)
     for name, exporter_cfg in sorted(enabled.items()):
+        if name in failed:
+            continue
         _print_line(f"{name}: {exporter_cfg['path']}")
+
+    if failed:
+        raise click.ClickException(f"Exporters failed: {', '.join(sorted(failed))}")

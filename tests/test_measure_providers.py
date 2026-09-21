@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -51,7 +52,9 @@ def _build_tree_with_hardlink_and_symlink(tmp_path: Path) -> tuple[Path, int, in
     link_to_external.symlink_to(external_dir, target_is_directory=True)
 
     expected_bytes = (
-        os.lstat(file_a).st_blocks * 512
+        os.lstat(root).st_blocks * 512
+        + os.lstat(subdir).st_blocks * 512
+        + os.lstat(file_a).st_blocks * 512
         + os.lstat(file_b).st_blocks * 512
         + os.lstat(link_to_external).st_blocks * 512
     )
@@ -65,6 +68,56 @@ def test_scan_directory_size_dedups_hardlinks_and_skips_symlinked_dirs(tmp_path:
     total_bytes, file_count = _scan_directory_size(str(root))
 
     assert total_bytes == expected_bytes
+    assert file_count == expected_file_count
+
+
+def test_scan_directory_size_includes_root_and_nested_directory_blocks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mirror_plugin_statistics.measure import providers
+
+    root = tmp_path / "root"
+    root.mkdir()
+    nested = root / "nested"
+    nested.mkdir()
+    allocated_blocks = {str(root): 3, str(nested): 5}
+    real_stat = os.stat
+
+    def fake_stat(path: str, **kwargs: object) -> object:
+        blocks = allocated_blocks.get(os.fspath(path))
+        if blocks is not None:
+            return type("DirectoryStat", (), {"st_blocks": blocks})()
+        return real_stat(path, **kwargs)
+
+    monkeypatch.setattr(providers.os, "stat", fake_stat)
+
+    total_bytes, file_count = _scan_directory_size(str(root))
+
+    assert total_bytes == (3 + 5) * 512
+    assert file_count == 0
+
+
+def test_scan_directory_size_matches_gnu_du(tmp_path: Path) -> None:
+    du_binary = shutil.which("du")
+    if du_binary is None:
+        pytest.skip("du is not installed")
+    version = subprocess.run(
+        [du_binary, "--version"], capture_output=True, text=True, check=False
+    )
+    if version.returncode != 0 or "GNU coreutils" not in version.stdout:
+        pytest.skip("GNU du is not installed")
+
+    root, _, expected_file_count = _build_tree_with_hardlink_and_symlink(tmp_path)
+    completed = subprocess.run(
+        [du_binary, "-s", "-B1", "--", str(root)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    total_bytes, file_count = _scan_directory_size(str(root))
+
+    assert total_bytes == int(completed.stdout.split()[0])
     assert file_count == expected_file_count
 
 
@@ -359,11 +412,23 @@ def test_measure_usage_selects_xfs_quota_for_configured_project(
     projects_file.write_text(f"77:{real}\n")
     monkeypatch.setattr(providers, "_XFS_PROJECTS_PATH", str(projects_file))
     monkeypatch.setattr(providers.shutil, "which", lambda name: f"/usr/sbin/{name}")
-    # xfs_quota report -p -N: "#<proj> <blocks(KiB)> ..." -> bytes = blocks * 1024.
+    captured_commands: list[list[str]] = []
+
+    def xfs_quota_report(command: list[str]) -> subprocess.CompletedProcess:
+        captured_commands.append(command)
+        report_options = command[3].split()
+        project = "#77" if "-n" in report_options else "named-project"
+        return subprocess.CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout=f"{project} 3072 0 0 00 [------]\n",
+            stderr="",
+        )
+
     monkeypatch.setattr(
         providers.subprocess,
         "run",
-        _fake_run_router({"xfs_quota": _completed("#77 3072 0 0 00 [------]\n")}),
+        _fake_run_router({"xfs_quota": xfs_quota_report}),
     )
 
     result = measure_usage(str(tmp_path), ["xfs-quota", "du"])
@@ -371,6 +436,9 @@ def test_measure_usage_selects_xfs_quota_for_configured_project(
     assert result is not None
     assert result.source == "xfs-quota"
     assert result.bytes == 3072 * 1024
+    assert captured_commands == [
+        ["/usr/sbin/xfs_quota", "-x", "-c", "report -p -n -N", real]
+    ]
 
 
 def test_measure_usage_skips_zfs_when_mount_is_not_dataset_root(

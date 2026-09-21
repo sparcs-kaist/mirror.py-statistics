@@ -274,7 +274,7 @@ def _measure_with_xfs_quota(mountpoint: str, project_id: str) -> Optional[Measur
         return None
     try:
         completed = subprocess.run(
-            [xfs_quota_binary, "-x", "-c", "report -p -N", mountpoint],
+            [xfs_quota_binary, "-x", "-c", "report -p -n -N", mountpoint],
             capture_output=True,
             text=True,
             timeout=SUBPROCESS_TIMEOUT,
@@ -372,6 +372,8 @@ def _scan_directory_size(root: str) -> tuple[int, int]:
     pending_dirs = [root]
     while pending_dirs:
         current_dir = pending_dirs.pop()
+        directory_stat = os.stat(current_dir, follow_symlinks=False)
+        total_bytes += directory_stat.st_blocks * 512
         with os.scandir(current_dir) as entries:
             for entry in entries:
                 if entry.is_dir(follow_symlinks=False):

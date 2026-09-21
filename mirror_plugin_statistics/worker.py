@@ -173,8 +173,11 @@ class MeasureWorker:
             log.warning("Failed to read cached sample for %r from storage: %s", pkgid, exc)
             return None
 
-        if sample is not None:
-            with self._cache_lock:
+        with self._cache_lock:
+            cached = self._cache.get(pkgid)
+            if cached is not None:
+                return cached
+            if sample is not None:
                 self._cache[pkgid] = sample
         return sample
 

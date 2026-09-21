@@ -314,7 +314,7 @@ def test_run_exporters_skips_unknown_and_isolates_failure(
     monkeypatch.setitem(exporters.EXPORTERS, "ok", _ok)
 
     with caplog.at_level(logging.WARNING, logger="mirror"):
-        run_exporters(
+        failed = run_exporters(
             db_path,
             {
                 "unknown": {"path": str(tmp_path / "unknown.out")},
@@ -324,6 +324,7 @@ def test_run_exporters_skips_unknown_and_isolates_failure(
         )
 
     assert calls == ["failing", "ok"]
+    assert failed == ["unknown", "failing"]
     assert any("unknown" in message for message in caplog.messages)
     assert any("failing" in message for message in caplog.messages)
 
@@ -332,7 +333,7 @@ def test_run_exporters_runs_real_exporters_end_to_end(tmp_path: Path) -> None:
     db_path = tmp_path / "usage.sqlite3"
     _seed_db(db_path)
 
-    run_exporters(
+    failed = run_exporters(
         db_path,
         {
             "json": {"path": str(tmp_path / "usage.json")},
@@ -344,3 +345,4 @@ def test_run_exporters_runs_real_exporters_end_to_end(tmp_path: Path) -> None:
     assert (tmp_path / "usage.json").exists()
     assert (tmp_path / "usage-trend.svg").exists()
     assert (tmp_path / "usage.prom").exists()
+    assert failed == []

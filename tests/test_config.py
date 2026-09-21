@@ -16,6 +16,7 @@ from mirror_plugin_statistics.config import (
     default_config_dict,
     default_data_dir,
     load_config,
+    resolve_config,
 )
 from mirror_plugin_statistics.util import atomic_write_bytes, atomic_write_text, format_bytes
 
@@ -156,6 +157,25 @@ def test_load_config_never_raises_on_get_config_error(monkeypatch: pytest.Monkey
 
     assert cfg.data_dir == default_data_dir()
     assert cfg.retention_days == DEFAULT_RETENTION_DAYS
+
+
+def test_resolve_config_applies_data_dir_override_before_exporter_paths(tmp_path: Path) -> None:
+    override = tmp_path / "override"
+    explicit = tmp_path / "explicit.svg"
+
+    cfg = resolve_config(
+        {
+            "data_dir": str(tmp_path / "configured"),
+            "exporters": {
+                "trend_image": {"path": str(explicit)},
+            },
+        },
+        data_dir_override=override,
+    )
+
+    assert cfg.data_dir == override
+    assert cfg.exporters["json"]["path"] == str(override / "usage.json")
+    assert cfg.exporters["trend_image"]["path"] == str(explicit)
 
 
 # ---------------------------------------------------------------------------
